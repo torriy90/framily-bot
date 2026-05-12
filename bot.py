@@ -37,7 +37,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-haiku-4-5-20251001",
         max_tokens=1024,
         system="Ты полезный ассистент в групповом чате друзей. Отвечай коротко и по делу. Можешь шутить. Можно матом, можно жёстко, но умеренно.",
         messages=[{"role": "user", "content": clean_text}]
