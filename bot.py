@@ -60,5 +60,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(reply)
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(MessageHandler(filters.TEXT, handle_message))
+from telegram.ext import CommandHandler  async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):     await update.message.reply_text(f"Chat ID: `{update.message.chat_id}`
+User ID: `{update.message.from_user.id}`", parse_mode="Markdown")  app.add_handler(CommandHandler("myid", myid)) app.add_handler(MessageHandler(filters.TEXT, handle_message))
 app.run_polling()
