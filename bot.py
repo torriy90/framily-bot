@@ -12,7 +12,6 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_USERNAME = os.environ["BOT_USERNAME"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
-# Белый список — заполним после получения ID
 ALLOWED_IDS = set()
 ALLOWED_IDS.add(OWNER_ID)
 
@@ -43,7 +42,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = message.chat_id
     is_private = message.chat.type == "private"
 
-    # Проверка белого списка
     if user_id not in ALLOWED_IDS and chat_id not in ALLOWED_IDS:
         if is_private:
             username = message.from_user.username or message.from_user.first_name
@@ -76,7 +74,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     moscow = timezone(timedelta(hours=3))
-now = datetime.now(moscow).strftime("%d.%m.%Y %H:%M")
+    now = datetime.now(moscow).strftime("%d.%m.%Y %H:%M")
 
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
