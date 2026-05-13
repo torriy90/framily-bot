@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 import anthropic
@@ -75,7 +75,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    moscow = timezone(timedelta(hours=3))
+now = datetime.now(moscow).strftime("%d.%m.%Y %H:%M")
 
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
