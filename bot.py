@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 import anthropic
@@ -12,10 +13,11 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_USERNAME = os.environ["BOT_USERNAME"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
-ALLOWED_IDS = set()
-ALLOWED_IDS.add(OWNER_ID)
-
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# История сообщений — последние 20 на каждый чат
+history = defaultdict(list)
+MAX_HISTORY = 20
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -23,15 +25,11 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
         return
-    if not context.args:
-        await update.message.reply_text("Используй: /approve 123456789")
-        return
-    new_id = int(context.args[0])
-    ALLOWED_IDS.add(new_id)
-    await update.message.reply_text(f"✅ ID {new_id} добавлен в белый список")
+    history[update.message.chat_id].clear()
+    await update.message.reply_text("🧹 История очищена")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -42,18 +40,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = message.chat_id
     is_private = message.chat.type == "private"
 
-    if user_id not in ALLOWED_IDS and chat_id not in ALLOWED_IDS:
+    if user_id != OWNER_ID:
         if is_private:
             username = message.from_user.username or message.from_user.first_name
             await context.bot.send_message(
                 OWNER_ID,
-                f"⚠️ Незнакомец хочет доступ к боту:\n"
+                f"⚠️ Кто-то нашёл бота:\n"
                 f"Имя: {message.from_user.first_name}\n"
                 f"Username: @{username}\n"
-                f"ID: `{user_id}`\n\n"
-                f"Чтобы разрешить: `/approve {user_id}`",
+                f"ID: `{user_id}`",
                 parse_mode="Markdown"
             )
+            await message.reply_text("Доступ закрыт. Запрос отправлен владельцу.")
         return
 
     text = message.text
@@ -76,16 +74,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     moscow = timezone(timedelta(hours=3))
     now = datetime.now(moscow).strftime("%d.%m.%Y %H:%M")
 
+    # Добавляем сообщение в историю
+    history[chat_id].append({"role": "user", "content": clean_text})
+    if len(history[chat_id]) > MAX_HISTORY:
+        history[chat_id] = history[chat_id][-MAX_HISTORY:]
+
     response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        system=f"""Ты свой пацан в групповом чате друзей. Говоришь просто, без официоза.
-Шутишь, троллишь по-доброму, споришь если не согласен.
-Ненавидишь длинные ответы и занудство. Называешь вещи своими именами.
-Когда нужно — ищешь актуальную инфу в интернете.
-Сейчас: {now} (МСК).""",
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        system=f"Ты умный и полезный ассистент. Отвечаешь чётко и по делу, без лишней воды. Можешь шутить. Ищешь актуальную информацию когда нужно. Сейчас: {now} (МСК).",
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        messages=[{"role": "user", "content": clean_text}]
+        messages=history[chat_id]
     )
 
     reply = ""
@@ -94,10 +93,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply += block.text
 
     if reply:
+        # Добавляем ответ бота в историю
+        history[chat_id].append({"role": "assistant", "content": reply})
         await message.reply_text(reply)
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("myid", myid))
-app.add_handler(CommandHandler("approve", approve))
+app.add_handler(CommandHandler("clear", clear))
 app.add_handler(MessageHandler(filters.TEXT, handle_message))
 app.run_polling()
