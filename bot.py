@@ -17,12 +17,34 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 history = defaultdict(list)
 MAX_HISTORY = 20
+allowed_ids = set()
+allowed_ids.add(OWNER_ID)
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Chat ID: `{update.message.chat_id}`\nUser ID: `{update.message.from_user.id}`",
         parse_mode="Markdown"
     )
+
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != OWNER_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Используй: /approve 123456789")
+        return
+    new_id = int(context.args[0])
+    allowed_ids.add(new_id)
+    await update.message.reply_text(f"✅ ID {new_id} добавлен")
+
+async def revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != OWNER_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Используй: /revoke 123456789")
+        return
+    rem_id = int(context.args[0])
+    allowed_ids.discard(rem_id)
+    await update.message.reply_text(f"❌ ID {rem_id} удалён")
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
@@ -39,7 +61,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = message.chat_id
     is_private = message.chat.type == "private"
 
-    if user_id != OWNER_ID:
+    if user_id not in allowed_ids:
         if is_private:
             username = message.from_user.username or message.from_user.first_name
             await context.bot.send_message(
@@ -47,7 +69,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⚠️ Кто-то нашёл бота:\n"
                 f"Имя: {message.from_user.first_name}\n"
                 f"Username: @{username}\n"
-                f"ID: `{user_id}`",
+                f"ID: `{user_id}`\n\n"
+                f"Одобрить: `/approve {user_id}`",
                 parse_mode="Markdown"
             )
             await message.reply_text("Доступ закрыт. Запрос отправлен владельцу.")
@@ -104,6 +127,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("myid", myid))
+app.add_handler(CommandHandler("approve", approve))
+app.add_handler(CommandHandler("revoke", revoke))
 app.add_handler(CommandHandler("clear", clear))
 app.add_handler(MessageHandler(filters.TEXT, handle_message))
 app.run_polling()
