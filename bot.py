@@ -15,7 +15,6 @@ OWNER_ID = int(os.environ["OWNER_ID"])
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# История сообщений — последние 20 на каждый чат
 history = defaultdict(list)
 MAX_HISTORY = 20
 
@@ -74,7 +73,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     moscow = timezone(timedelta(hours=3))
     now = datetime.now(moscow).strftime("%d.%m.%Y %H:%M")
 
-    # Добавляем сообщение в историю
     history[chat_id].append({"role": "user", "content": clean_text})
     if len(history[chat_id]) > MAX_HISTORY:
         history[chat_id] = history[chat_id][-MAX_HISTORY:]
@@ -82,7 +80,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=2048,
-        system=f"Ты умный и полезный ассистент. Отвечаешь чётко и по делу, без лишней воды. Можешь шутить. Ищешь актуальную информацию когда нужно. Сейчас: {now} (МСК).",
+        system=f"""Ты умный и полезный ассистент. Отвечаешь чётко и по делу, без лишней воды. Можешь шутить. Ищешь актуальную информацию когда нужно. Сейчас: {now} (МСК).
+
+Форматирование — только Telegram Markdown:
+- Жирный: *текст*
+- Курсив: _текст_
+- Код: `текст`
+- Никаких ## заголовков
+- Никаких таблиц — замени на список с дефисами
+- Никаких --- разделителей""",
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=history[chat_id]
     )
@@ -93,9 +99,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply += block.text
 
     if reply:
-        # Добавляем ответ бота в историю
         history[chat_id].append({"role": "assistant", "content": reply})
-        await message.reply_text(reply)
+        await message.reply_text(reply, parse_mode="Markdown")
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("myid", myid))
