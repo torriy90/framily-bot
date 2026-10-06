@@ -23,7 +23,7 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BOT_USERNAME = os.environ["BOT_USERNAME"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5-5"
 MAX_HISTORY = 40        # сколько последних сообщений помним на каждый чат
 DEBOUNCE_SECONDS = 3.0  # ждём столько после последнего сообщения (для пачек пересылок)
 TG_LIMIT = 4000
