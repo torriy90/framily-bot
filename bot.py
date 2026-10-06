@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
@@ -24,9 +25,18 @@ BOT_USERNAME = os.environ["BOT_USERNAME"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
 MODEL = "claude-sonnet-5-5"
+# Насколько глубоко модель «думает» перед ответом: low = быстро и дёшево,
+# medium = баланс, high = медленно и вдумчиво. Меняется переменной EFFORT на Railway.
+EFFORT = os.environ.get("EFFORT", "medium").lower()
+if EFFORT not in ("low", "medium", "high", "xhigh", "max"):
+    EFFORT = "medium"
+
 MAX_HISTORY = 40        # сколько последних сообщений помним на каждый чат
 DEBOUNCE_SECONDS = 3.0  # ждём столько после последнего сообщения (для пачек пересылок)
 TG_LIMIT = 4000
+MAX_IMAGES = 10
+MAX_IMAGE_BYTES = 7 * 1024 * 1024
+IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 # Постоянное хранилище: на Railway это volume, смонтированный в /data
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -57,7 +67,7 @@ history = load_json(HISTORY_FILE, {})  # {"chat_id": [{"role":..., "content":...
 allowed_ids = set(load_json(ALLOWED_FILE, []))
 allowed_ids.add(OWNER_ID)
 
-pending = {}  # chat_id -> {"parts": [...], "message": Message, "timer": Task}
+pending = {}  # chat_id -> {"parts": [...], "images": [...], "message": Message, "timer": Task}
 locks = {}    # chat_id -> asyncio.Lock
 
 
@@ -97,6 +107,26 @@ def build_part(message, clean_text):
         quoted = reply.text[:500]
         return f"[Ответ на сообщение: «{quoted}»]\n{clean_text}"
     return clean_text
+
+
+async def download_image(message):
+    """Возвращает (bytes, media_type), "too_big", "unsupported" или None, если картинки нет."""
+    if message.photo:
+        tg_file = await message.photo[-1].get_file()
+        media_type = "image/jpeg"
+    elif message.document and (message.document.mime_type or "").startswith("image/"):
+        media_type = message.document.mime_type
+        if media_type not in IMAGE_TYPES:
+            return "unsupported"
+        if message.document.file_size and message.document.file_size > MAX_IMAGE_BYTES:
+            return "too_big"
+        tg_file = await message.document.get_file()
+    else:
+        return None
+    data = bytes(await tg_file.download_as_bytearray())
+    if len(data) > MAX_IMAGE_BYTES:
+        return "too_big"
+    return data, media_type
 
 
 async def send_reply(message, text):
@@ -172,6 +202,11 @@ def system_prompt():
 - Пометка вида [Пересланное сообщение, автор: ...] означает, что текст написал не пользователь, а другой человек или канал.
 - Если пользователь ссылается на прошлую сессию, которой у тебя нет, прямо скажи об этом и попроси скинуть диалог или суть.
 
+Изображения:
+- Пользователь может присылать скриншоты и фото. Читай текст на них, описывай, что видно, и отвечай на подпись или вопрос к картинке.
+- Если подписи нет, коротко опиши, что на изображении, а если это скриншот с текстом — перескажи его суть и спроси, что с ним сделать.
+- Картинки из прошлых сообщений ты уже не видишь, помнишь только пометку, что они были. Если нужно вернуться к картинке, попроси прислать её снова.
+
 Форматирование — только Telegram Markdown:
 - Жирный: *текст*
 - Курсив: _текст_
@@ -181,28 +216,61 @@ def system_prompt():
 - Никаких --- разделителей"""
 
 
-async def process(chat_id, parts, message):
+def call_api(api_msgs):
+    kwargs = dict(
+        model=MODEL,
+        max_tokens=4096,
+        system=system_prompt(),
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=api_msgs,
+    )
+    try:
+        return client.messages.create(
+            **kwargs, extra_body={"output_config": {"effort": EFFORT}}
+        )
+    except anthropic.BadRequestError as e:
+        # Если API не принял параметр effort — пробуем без него
+        logging.warning("Запрос с effort отклонён, повторяю без него: %s", e)
+        return client.messages.create(**kwargs)
+
+
+async def process(chat_id, parts, images, message):
     key = str(chat_id)
-    user_text = "\n\n".join(parts)
+    user_text = "\n\n".join(parts).strip()
+    if not user_text and images:
+        user_text = "Пользователь прислал изображение без подписи."
+    # В историю пишем только текст: сами картинки не храним
+    stored_text = user_text
+    if images:
+        stored_text += f"\n[приложено изображений: {len(images)}]"
 
     async with get_lock(chat_id):
         msgs = history.setdefault(key, [])
-        msgs.append({"role": "user", "content": user_text})
+        msgs.append({"role": "user", "content": stored_text})
         if len(msgs) > MAX_HISTORY:
             del msgs[: len(msgs) - MAX_HISTORY]
         # история обязана начинаться с сообщения пользователя
         while msgs and msgs[0]["role"] != "user":
             msgs.pop(0)
 
+        api_msgs = list(msgs)
+        if images:
+            blocks = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": base64.b64encode(data).decode("ascii"),
+                    },
+                }
+                for data, media_type in images
+            ]
+            blocks.append({"type": "text", "text": user_text})
+            api_msgs[-1] = {"role": "user", "content": blocks}
+
         try:
-            response = await asyncio.to_thread(
-                client.messages.create,
-                model=MODEL,
-                max_tokens=2048,
-                system=system_prompt(),
-                tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                messages=msgs,
-            )
+            response = await asyncio.to_thread(call_api, api_msgs)
         except Exception:
             logging.exception("Anthropic API error")
             msgs.pop()  # не оставляем «висящее» сообщение в истории
@@ -233,12 +301,12 @@ async def flush(chat_id, context):
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     except Exception:
         pass
-    await process(chat_id, entry["parts"], entry["message"])
+    await process(chat_id, entry["parts"], entry["images"], entry["message"])
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    if not message or not message.text or not message.from_user:
+    if not message or not message.from_user:
         return
 
     user_id = message.from_user.id
@@ -260,7 +328,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("Доступ закрыт. Запрос отправлен владельцу.")
         return
 
-    text = message.text
+    # Текст сообщения или подпись к картинке
+    text = message.text or message.caption or ""
     bot_mentioned = f"@{BOT_USERNAME}" in text
     is_reply_to_bot = bool(
         message.reply_to_message
@@ -272,20 +341,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     clean_text = text.replace(f"@{BOT_USERNAME}", "").strip()
-    if not clean_text:
+
+    image = None
+    if message.photo or message.document:
+        result = await download_image(message)
+        if result == "too_big":
+            await message.reply_text("Картинка слишком большая, пришли поменьше (до 7 МБ).")
+            return
+        if result == "unsupported":
+            await message.reply_text("Этот формат картинки я не читаю, пришли JPG, PNG, WEBP или GIF.")
+            return
+        image = result
+
+    if not clean_text and not image:
         return
 
-    part = build_part(message, clean_text)
+    part = build_part(message, clean_text) if clean_text else None
 
-    # Копим сообщения, пришедшие подряд (пачка пересылок), и отвечаем один раз на всё
+    # Копим сообщения, пришедшие подряд (пачка пересылок, альбом), и отвечаем один раз на всё
     entry = pending.get(chat_id)
     if entry:
-        entry["parts"].append(part)
         entry["message"] = message
         entry["timer"].cancel()
     else:
-        entry = {"parts": [part], "message": message}
+        entry = {"parts": [], "images": [], "message": message}
         pending[chat_id] = entry
+    if part:
+        entry["parts"].append(part)
+    if image and len(entry["images"]) < MAX_IMAGES:
+        entry["images"].append(image)
     entry["timer"] = asyncio.create_task(flush(chat_id, context))
 
 
@@ -294,5 +378,10 @@ app.add_handler(CommandHandler("myid", myid))
 app.add_handler(CommandHandler("approve", approve))
 app.add_handler(CommandHandler("revoke", revoke))
 app.add_handler(CommandHandler("clear", clear))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(
+    MessageHandler(
+        (filters.TEXT | filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND,
+        handle_message,
+    )
+)
 app.run_polling()
