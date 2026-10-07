@@ -229,9 +229,48 @@ def call_api(api_msgs):
             **kwargs, extra_body={"output_config": {"effort": EFFORT}}
         )
     except anthropic.BadRequestError as e:
+        if "credit balance" in str(e).lower():
+            raise  # дело не в параметрах, повтор не поможет
         # Если API не принял параметр effort — пробуем без него
         logging.warning("Запрос с effort отклонён, повторяю без него: %s", e)
         return client.messages.create(**kwargs)
+
+
+OWNER_ALERT_COOLDOWN = 3600  # не чаще раза в час, чтобы не заспамить владельца
+last_owner_alert = {}
+
+
+def classify_api_error(exc):
+    """Возвращает (код проблемы, текст пользователю, текст владельцу или None)."""
+    text = str(exc).lower()
+    if "credit balance" in text:
+        return (
+            "billing",
+            "Бот временно недоступен: на счёте закончились деньги. Хозяину уже сообщил 🙏",
+            "⚠️ На балансе Anthropic закончились деньги, бот не отвечает. "
+            "Пополни: console.anthropic.com → Plans & Billing. После пополнения бот заработает сам.",
+        )
+    if isinstance(exc, anthropic.AuthenticationError) or isinstance(exc, anthropic.PermissionDeniedError):
+        return (
+            "auth",
+            "Бот временно недоступен: проблема с доступом к API. Хозяину уже сообщил 🙏",
+            "⚠️ Anthropic отклонил ключ API (ошибка доступа). Проверь ANTHROPIC_API_KEY в Railway "
+            "и состояние аккаунта в Console.",
+        )
+    if isinstance(exc, anthropic.RateLimitError):
+        return ("rate", "Слишком много запросов сразу, подожди минутку и повтори 🙏", None)
+    return ("other", "Что-то пошло не так на моей стороне, попробуй ещё раз 🙏", None)
+
+
+async def alert_owner(bot, code, text):
+    now = datetime.now().timestamp()
+    if now - last_owner_alert.get(code, 0) < OWNER_ALERT_COOLDOWN:
+        return
+    last_owner_alert[code] = now
+    try:
+        await bot.send_message(OWNER_ID, text)
+    except Exception:
+        logging.exception("Не удалось отправить уведомление владельцу")
 
 
 async def process(chat_id, parts, images, message):
@@ -271,10 +310,13 @@ async def process(chat_id, parts, images, message):
 
         try:
             response = await asyncio.to_thread(call_api, api_msgs)
-        except Exception:
+        except Exception as exc:
             logging.exception("Anthropic API error")
             msgs.pop()  # не оставляем «висящее» сообщение в истории
-            await message.reply_text("Что-то пошло не так на моей стороне, попробуй ещё раз 🙏")
+            code, user_text_err, owner_text = classify_api_error(exc)
+            await message.reply_text(user_text_err)
+            if owner_text:
+                await alert_owner(message.get_bot(), code, owner_text)
             return
 
         reply = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
