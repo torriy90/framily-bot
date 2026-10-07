@@ -25,11 +25,13 @@ BOT_USERNAME = os.environ["BOT_USERNAME"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 
 MODEL = "claude-sonnet-5-5"
-# Насколько глубоко модель «думает» перед ответом: low = быстро и дёшево,
-# medium = баланс, high = медленно и вдумчиво. Меняется переменной EFFORT на Railway.
-EFFORT = os.environ.get("EFFORT", "medium").lower()
-if EFFORT not in ("low", "medium", "high", "xhigh", "max"):
-    EFFORT = "medium"
+# Модель отвечает без «размышлений вперёд» (thinking: between_tools), так быстрее и дешевле.
+# EFFORT — сколько усилий она вкладывает в ответ: low = быстро и дёшево,
+# medium = баланс, high = вдумчивее и дороже. Меняется переменной EFFORT на Railway.
+# (с between_tools допустимы только low / medium / high)
+EFFORT = os.environ.get("EFFORT", "low").lower()
+if EFFORT not in ("low", "medium", "high"):
+    EFFORT = "low"
 
 MAX_HISTORY = 40        # сколько последних сообщений помним на каждый чат
 DEBOUNCE_SECONDS = 3.0  # ждём столько после последнего сообщения (для пачек пересылок)
@@ -226,13 +228,17 @@ def call_api(api_msgs):
     )
     try:
         return client.messages.create(
-            **kwargs, extra_body={"output_config": {"effort": EFFORT}}
+            **kwargs,
+            extra_body={
+                "thinking": {"type": "between_tools"},
+                "output_config": {"effort": EFFORT},
+            },
         )
     except anthropic.BadRequestError as e:
         if "credit balance" in str(e).lower():
             raise  # дело не в параметрах, повтор не поможет
-        # Если API не принял параметр effort — пробуем без него
-        logging.warning("Запрос с effort отклонён, повторяю без него: %s", e)
+        # Если API не принял настройки thinking/effort — пробуем без них (будет медленнее, но ответит)
+        logging.warning("Запрос с thinking/effort отклонён, повторяю без них: %s", e)
         return client.messages.create(**kwargs)
 
 
